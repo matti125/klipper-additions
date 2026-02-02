@@ -1,0 +1,174 @@
+---
+- name: Clone / update 3D-printer repos under ~pi/devs
+  hosts: all
+  become: false
+  gather_facts: false
+
+  vars:
+    devs_dir: /home/pi/devs
+
+    # Leave empty for public HTTPS repos.
+    # Set to an SSH deploy key path if you clone private repos via SSH.
+    git_ssh_key_file: ""   # e.g. /home/pi/.ssh/github_deploy_key
+
+    git_accept_hostkey: true
+
+    repos:
+    - name: cfg-expander
+      repo: "https://github.com/matti125/cfg-expander.git"
+      version: main
+
+    - name: deploy-key-setup
+      repo: "https://github.com/matti125/deploy-key-setup.git"
+      version: main
+    - name: ratemeter
+      repo: "https://github.com/matti125/ratemeter.git"
+      version: master
+
+    - name: motors-sync
+      repo: "https://github.com/MRX8024/motors-sync.git"
+      version: hybrid-corexy-kinematics-support
+
+
+  tasks:
+    - name: Prompt for pi password (bootstrap only)
+      ansible.builtin.pause:
+        prompt: "Enter new password for user pi (leave blank to skip)"
+        echo: false
+      register: pi_password_prompt
+      tags: [bootstrap, never]
+
+    - name: Set pi password fact
+      ansible.builtin.set_fact:
+        pi_password: "{{ (pi_password_prompt.user_input | default('')) }}"
+      tags: [bootstrap, never]
+
+    - name: Ensure ~/devs exists
+      ansible.builtin.file:
+        path: "{{ devs_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Ensure ~/.influxdbv2 exists
+      ansible.builtin.file:
+        path: /home/pi/.influxdbv2
+        state: directory
+        owner: pi
+        group: pi
+        mode: "0700"
+
+    - name: Copy InfluxDB v2 configs file
+      ansible.builtin.copy:
+        src: files/.influxdbv2/configs
+        dest: /home/pi/.influxdbv2/configs
+        owner: pi
+        group: pi
+        mode: "0700"
+
+    - name: Ensure ~/.ssh exists
+      ansible.builtin.file:
+        path: /home/pi/.ssh
+        state: directory
+        owner: pi
+        group: pi
+        mode: "0700"
+
+    - name: Copy SSH private key
+      ansible.builtin.copy:
+        src: files/.ssh/github-ratos-ratos2
+        dest: /home/pi/.ssh/github-ratos-ratos2
+        owner: pi
+        group: pi
+        mode: "0600"
+
+    - name: Copy SSH public key
+      ansible.builtin.copy:
+        src: files/.ssh/github-ratos-ratos2.pub
+        dest: /home/pi/.ssh/github-ratos-ratos2.pub
+        owner: pi
+        group: pi
+        mode: "0644"
+
+    - name: Select default local public key (bootstrap)
+      ansible.builtin.set_fact:
+        local_pubkey_path: "{{ lookup('ansible.builtin.first_found', params) }}"
+      vars:
+        params:
+          files:
+            - "{{ lookup('env','HOME') + '/.ssh/id_ed25519.pub' }}"
+            - "{{ lookup('env','HOME') + '/.ssh/id_rsa.pub' }}"
+            - "{{ lookup('env','HOME') + '/.ssh/id_ecdsa.pub' }}"
+            - "{{ lookup('env','HOME') + '/.ssh/id_dsa.pub' }}"
+          skip: true
+      tags: [bootstrap, never]
+
+    - name: Ensure a local public key was found (bootstrap)
+      ansible.builtin.assert:
+        that:
+          - local_pubkey_path | length > 0
+        fail_msg: "No local SSH public key found in ~/.ssh (id_ed25519.pub, id_rsa.pub, id_ecdsa.pub, id_dsa.pub)."
+      tags: [bootstrap, never]
+
+    - name: Add authorized key for pi (bootstrap)
+      ansible.builtin.authorized_key:
+        user: pi
+        key: "{{ lookup('ansible.builtin.file', local_pubkey_path) }}"
+        state: present
+      become: true
+      tags: [bootstrap, never]
+
+    - name: Clone/update repos
+      ansible.builtin.git:
+        repo: "{{ item.repo }}"
+        dest: "{{ devs_dir }}/{{ item.name }}"
+        version: "{{ item.version | default('HEAD') }}"
+        update: true
+        force: false
+        accept_hostkey: "{{ git_accept_hostkey }}"
+        key_file: "{{ (git_ssh_key_file | length > 0) | ternary(git_ssh_key_file, omit) }}"
+      loop: "{{ repos }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Copy ratemeter systemd unit
+      ansible.builtin.copy:
+        src: "{{ devs_dir }}/ratemeter/ratemeter.service"
+        dest: /etc/systemd/system/ratemeter.service
+        owner: root
+        group: root
+        mode: "0644"
+        remote_src: true
+      become: true
+
+    - name: Ensure ll alias for interactive bash shells
+      ansible.builtin.blockinfile:
+        path: /etc/bash.bashrc
+        marker: "# {mark} ANSIBLE LL ALIAS"
+        block: |
+          alias ll='ls -la'
+      become: true
+
+    - name: Reload systemd units
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: true
+
+    - name: Enable and start ratemeter service
+      ansible.builtin.systemd:
+        name: ratemeter.service
+        enabled: true
+        state: started
+      become: true
+
+    - name: Set pi password once
+      ansible.builtin.user:
+        name: pi
+        password: "{{ pi_password | password_hash('sha512') }}"
+      when:
+        - (pi_password | default('')) | length > 0
+      become: true
+      tags: [bootstrap, never]
+
+
+
+       
