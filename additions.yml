@@ -6,6 +6,10 @@
 
   vars:
     devs_dir: /home/pi/devs
+    printer_config_dir: /home/pi/printer_data/config
+    ratos_repo: "git@github.com:matti125/ratos-ratos2.git"
+    ratos_version: master
+    ratos_deploy_key: /home/pi/.ssh/github-ratos-ratos2
 
     # Leave empty for public HTTPS repos.
     # Set to an SSH deploy key path if you clone private repos via SSH.
@@ -49,6 +53,12 @@
         state: directory
         mode: "0755"
 
+    - name: Ensure printer config dir exists
+      ansible.builtin.file:
+        path: "{{ printer_config_dir }}"
+        state: directory
+        mode: "0755"
+
     - name: Ensure ~/.influxdbv2 exists
       ansible.builtin.file:
         path: /home/pi/.influxdbv2
@@ -72,6 +82,24 @@
         owner: pi
         group: pi
         mode: "0700"
+
+    - name: Add GitHub host keys
+      ansible.builtin.known_hosts:
+        path: /home/pi/.ssh/known_hosts
+        name: github.com
+        key: "{{ item }}"
+        state: present
+      loop:
+        - "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+        - "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg="
+        - "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk="
+
+    - name: Ensure known_hosts is owned by pi
+      ansible.builtin.file:
+        path: /home/pi/.ssh/known_hosts
+        owner: pi
+        group: pi
+        mode: "0644"
 
     - name: Copy SSH private key
       ansible.builtin.copy:
@@ -116,6 +144,34 @@
         state: present
       become: true
       tags: [bootstrap, never]
+
+    - name: Initialize git repo in printer config dir
+      ansible.builtin.command: git init
+      args:
+        chdir: "{{ printer_config_dir }}"
+        creates: "{{ printer_config_dir }}/.git"
+
+    - name: Ensure ratos repo remote exists
+      ansible.builtin.command: git remote add origin {{ ratos_repo }}
+      args:
+        chdir: "{{ printer_config_dir }}"
+      register: ratos_remote_add
+      changed_when: ratos_remote_add.rc == 0
+      failed_when: ratos_remote_add.rc != 0 and ("already exists" not in ratos_remote_add.stderr)
+
+    - name: Fetch ratos repo
+      ansible.builtin.command: git fetch --depth=1 origin {{ ratos_version }}
+      args:
+        chdir: "{{ printer_config_dir }}"
+      environment:
+        GIT_SSH_COMMAND: "ssh -i {{ ratos_deploy_key }} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+
+    - name: Restore ratos .gitignore and local folder only
+      ansible.builtin.command: git checkout origin/{{ ratos_version }} -- .gitignore local
+      args:
+        chdir: "{{ printer_config_dir }}"
+      environment:
+        GIT_SSH_COMMAND: "ssh -i {{ ratos_deploy_key }} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
 
     - name: Clone/update repos
       ansible.builtin.git:
